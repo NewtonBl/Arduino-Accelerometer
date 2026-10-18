@@ -10,6 +10,6 @@ the LEDs then show how far the board has moved from it:
 | > 0.50°                     | Red (pin 10)   |
 
 Sketch: [`TiltLeveler/TiltLeveler.ino`](TiltLeveler/TiltLeveler.ino) — uses only the built-in `Wire` library.
-Wiring notes are in the comment block at the top of the sketch. Serial Monitor: 115200 baud.
+Wiring notes are in the comment block at the top of the sketch. Serial Monitor: 9600 baud. At power-up each LED lights in turn (blue, green, red) as a wiring check.
 
 If tilting the stick the way you care about doesn't change the reading, set `USE_ROLL` to `false`.

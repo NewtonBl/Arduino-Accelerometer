@@ -26,7 +26,11 @@
     Red LED   -> pin 10 (through resistor)
 
   No extra libraries needed - only Wire, which ships with the Arduino IDE.
-  Open the Serial Monitor at 115200 baud to watch the readings.
+  Open the Serial Monitor at 9600 baud to watch the readings.
+
+  At power-up each LED lights for half a second (blue, green, red) so you
+  can check the LED wiring, then the sketch reports on the Serial Monitor
+  whether it found the MPU-6050.
 */
 
 #include <Wire.h>
@@ -49,7 +53,9 @@ const bool USE_ROLL = true;   // true = rotation about the sensor's X axis
                               // false = rotation about the sensor's Y axis
 
 // ---------------- MPU-6050 registers ----------------
-const uint8_t MPU_ADDR     = 0x68;
+// 0x68 when AD0 is low/unconnected, 0x69 when AD0 is high. Detected at startup.
+uint8_t mpuAddr = 0x68;
+const uint8_t REG_WHO_AM_I = 0x75;
 const uint8_t REG_PWR_MGMT = 0x6B;
 const uint8_t REG_CONFIG   = 0x1A;
 const uint8_t REG_ACCEL_CFG = 0x1C;
@@ -76,7 +82,7 @@ unsigned long lastPrint = 0;
 
 // Write one byte to an MPU-6050 register.
 void writeRegister(uint8_t reg, uint8_t value) {
-  Wire.beginTransmission(MPU_ADDR);
+  Wire.beginTransmission(mpuAddr);
   Wire.write(reg);
   Wire.write(value);
   Wire.endTransmission();
@@ -84,14 +90,57 @@ void writeRegister(uint8_t reg, uint8_t value) {
 
 // Read raw accelerometer X, Y, Z. Returns false if the sensor didn't answer.
 bool readAccel(int16_t &ax, int16_t &ay, int16_t &az) {
-  Wire.beginTransmission(MPU_ADDR);
+  Wire.beginTransmission(mpuAddr);
   Wire.write(REG_ACCEL_X);
   if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(MPU_ADDR, (uint8_t)6) != 6) return false;
+  if (Wire.requestFrom(mpuAddr, (uint8_t)6) != 6) return false;
   ax = (Wire.read() << 8) | Wire.read();
   ay = (Wire.read() << 8) | Wire.read();
   az = (Wire.read() << 8) | Wire.read();
   return true;
+}
+
+// True if a device acknowledges at this I2C address.
+bool devicePresent(uint8_t addr) {
+  Wire.beginTransmission(addr);
+  return Wire.endTransmission() == 0;
+}
+
+// Print every address on the I2C bus, to help track down wiring problems.
+void scanI2C() {
+  Serial.println(F("Scanning I2C bus..."));
+  int found = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    if (devicePresent(addr)) {
+      Serial.print(F("  Device found at 0x"));
+      Serial.println(addr, HEX);
+      found++;
+    }
+  }
+  if (found == 0) {
+    Serial.println(F("  No I2C devices found. Check SDA, SCL, VCC and GND wiring."));
+  }
+}
+
+// Find the MPU-6050 at 0x68 or 0x69. Returns false if it isn't there.
+bool findMpu() {
+  const uint8_t candidates[] = {0x68, 0x69};
+  for (uint8_t addr : candidates) {
+    if (devicePresent(addr)) {
+      mpuAddr = addr;
+      return true;
+    }
+  }
+  return false;
+}
+
+// Read one byte from an MPU-6050 register (0xFF on failure).
+uint8_t readRegister(uint8_t reg) {
+  Wire.beginTransmission(mpuAddr);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return 0xFF;
+  if (Wire.requestFrom(mpuAddr, (uint8_t)1) != 1) return 0xFF;
+  return Wire.read();
 }
 
 // Average several accelerometer readings and convert to a tilt angle in degrees.
@@ -125,6 +174,20 @@ void setLeds(bool blue, bool green, bool red) {
   digitalWrite(RED_LED,   red   ? HIGH : LOW);
 }
 
+// Light each LED in turn so the wiring can be checked by eye.
+void ledSelfTest() {
+  Serial.println(F("LED test: blue (pin 9)"));
+  setLeds(true, false, false);
+  delay(500);
+  Serial.println(F("LED test: green (pin 8)"));
+  setLeds(false, true, false);
+  delay(500);
+  Serial.println(F("LED test: red (pin 10)"));
+  setLeds(false, false, true);
+  delay(500);
+  setLeds(false, false, false);
+}
+
 // Quick flash of all three LEDs to confirm a saved reading.
 void flashConfirm() {
   for (int i = 0; i < 2; i++) {
@@ -135,17 +198,50 @@ void flashConfirm() {
   }
 }
 
+// Blink red forever so the problem is obvious without a computer,
+// repeating the hint on the Serial Monitor every few seconds.
+void haltWithError() {
+  unsigned long lastHint = millis();
+  while (true) {
+    setLeds(false, false, true);
+    delay(250);
+    setLeds(false, false, false);
+    delay(250);
+    if (millis() - lastHint >= 3000) {
+      lastHint = millis();
+      Serial.println(F("Stopped: sensor problem. Check wiring, then press RESET."));
+    }
+  }
+}
+
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
+  Serial.println();
+  Serial.println(F("TiltLeveler starting..."));
 
   pinMode(BUTTON_PIN, INPUT);   // external pull-down resistor
   pinMode(BLUE_LED, OUTPUT);
   pinMode(GREEN_LED, OUTPUT);
   pinMode(RED_LED, OUTPUT);
   setLeds(false, false, false);
+  ledSelfTest();
 
   Wire.begin();
-  Wire.setClock(400000);
+  Wire.setClock(100000);
+#if defined(WIRE_HAS_TIMEOUT)
+  // Without a timeout, a bad I2C connection can freeze the Arduino forever.
+  Wire.setWireTimeout(3000, true);
+#endif
+
+  if (!findMpu()) {
+    Serial.println(F("MPU-6050 not found at 0x68 or 0x69!"));
+    scanI2C();
+    haltWithError();
+  }
+  Serial.print(F("MPU-6050 found at 0x"));
+  Serial.print(mpuAddr, HEX);
+  Serial.print(F(", WHO_AM_I = 0x"));
+  Serial.println(readRegister(REG_WHO_AM_I), HEX);
 
   writeRegister(REG_PWR_MGMT, 0x00);   // wake the MPU-6050 (it boots asleep)
   writeRegister(REG_ACCEL_CFG, 0x00);  // +/-2g range = best resolution
@@ -154,14 +250,8 @@ void setup() {
 
   float first = readTiltAngle();
   if (isnan(first)) {
-    Serial.println(F("MPU-6050 not found! Check SDA/SCL/VCC/GND wiring."));
-    // Blink red forever so the problem is obvious without a computer.
-    while (true) {
-      setLeds(false, false, true);
-      delay(250);
-      setLeds(false, false, false);
-      delay(250);
-    }
+    Serial.println(F("MPU-6050 found but could not read accelerometer data."));
+    haltWithError();
   }
   filteredAngle = first;
 
